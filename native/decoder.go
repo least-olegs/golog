@@ -19,13 +19,59 @@ func NewDecoder(m golog.Machine) *Decoder {
 	}
 }
 
-func (d *Decoder) Decode(t term.Term, val interface{}) error {
+type Watcher struct {
+	Variable *term.Variable
+	Watched  reflect.Value
+	oldValue interface{}
+}
+
+func NewWatcher(ref reflect.Value, v *term.Variable) *Watcher {
+	return &Watcher{
+		Variable: v,
+		Watched:  ref,
+		oldValue: ref.Interface(),
+	}
+}
+
+func (w *Watcher) HasChanged() bool {
+	return w.Watched.Interface() != w.oldValue
+}
+
+func (w *Watcher) Value() interface{} {
+	return w.Watched.Interface()
+}
+
+type Watchers []*Watcher
+
+func (ws Watchers) Variables() (result []*term.Variable) {
+	names := map[string]bool{}
+	for _, w := range ws {
+		v := w.Variable
+		if !names[v.Name] {
+			result = append(result, v)
+			names[v.Name] = true
+		}
+	}
+	return result
+}
+
+func (d *Decoder) Decode(t term.Term, val interface{}) ([]*Watcher, error) {
 	return d.pgValue(t, reflect.ValueOf(val))
 }
 
-func (d *Decoder) pgValue(t term.Term, val reflect.Value) error {
+func (d *Decoder) DecodeGround(t term.Term, val interface{}) error {
+	_, err := d.pgValue(t, reflect.ValueOf(val))
+	return err
+}
+
+func (d *Decoder) pgValue(t term.Term, val reflect.Value) ([]*Watcher, error) {
 	if !val.IsValid() {
-		return nil
+		return nil, nil
+	}
+	if term.IsVariable(t) {
+		return []*Watcher{
+			NewWatcher(val, t.(*term.Variable)),
+		}, nil
 	}
 	if val.CanInterface() {
 		if _, ok := val.Interface().(Marshaler); ok {
@@ -34,41 +80,41 @@ func (d *Decoder) pgValue(t term.Term, val reflect.Value) error {
 			} else {
 				val.Elem().Set(reflect.New(val.Elem().Type()).Elem())
 			}
-			return val.Interface().(Marshaler).MarshalProlog(d.m, t)
+			return nil, val.Interface().(Marshaler).MarshalProlog(d.m, t)
 		}
 		maybeVal := reflect.New(val.Type())
 		if _, ok := maybeVal.Interface().(Marshaler); ok {
 			err := maybeVal.Interface().(Marshaler).MarshalProlog(d.m, t)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			val.Set(maybeVal.Elem())
-			return nil
+			return nil, nil
 		}
 	}
 	switch val.Type().Kind() {
 	case reflect.Bool:
-		return d.pgBool(t, val)
+		return nil, d.pgBool(t, val)
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		return d.pgInt(t, val)
+		return nil, d.pgInt(t, val)
 	case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
-		return d.pgUint(t, val)
+		return nil, d.pgUint(t, val)
 	case reflect.Float32, reflect.Float64:
-		return d.pgFloat(t, val)
+		return nil, d.pgFloat(t, val)
 	case reflect.Complex64, reflect.Complex128:
-		return d.pgComplex(t, val)
+		return nil, d.pgComplex(t, val)
 	case reflect.Array:
 		return d.pgArray(t, val)
 	case reflect.Slice:
 		return d.pgSlice(t, val)
 	case reflect.String:
-		return d.pgString(t, val)
+		return nil, d.pgString(t, val)
 	case reflect.Struct:
 		return d.pgStruct(t, val)
 	case reflect.Chan, reflect.Func, reflect.Map,
 		reflect.Uintptr, reflect.UnsafePointer:
 		val.Set(reflect.ValueOf(t.(*Native).val))
-		return nil
+		return nil, nil
 	case reflect.Ptr:
 		if IsNative(t) {
 			nv := reflect.ValueOf(t.(*Native).val)
@@ -77,7 +123,7 @@ func (d *Decoder) pgValue(t term.Term, val reflect.Value) error {
 			} else {
 				val.Elem().Set(reflect.New(val.Type()))
 			}
-			return nil
+			return nil, nil
 		}
 		return d.pgValue(t, val.Elem())
 	case reflect.Interface:
@@ -87,11 +133,11 @@ func (d *Decoder) pgValue(t term.Term, val reflect.Value) error {
 			} else {
 				val.Set(reflect.Zero(val.Type()))
 			}
-			return nil
+			return nil, nil
 		}
 		return d.pgValue(t, val.Elem())
 	}
-	return fmt.Errorf("Go added new type: %s", val.Type().Kind())
+	return nil, fmt.Errorf("Go added new type: %s", val.Type().Kind())
 }
 
 func (d *Decoder) pgBool(t term.Term, val reflect.Value) error {
@@ -179,26 +225,30 @@ func (d *Decoder) pgComplex(t term.Term, val reflect.Value) error {
 	return nil
 }
 
-func (d *Decoder) pgArray(t term.Term, val reflect.Value) error {
-	return nil
+func (d *Decoder) pgArray(t term.Term, val reflect.Value) ([]*Watcher, error) {
+	// TODO(wvxvw): Implement
+	return nil, nil
 }
 
-func (d *Decoder) pgSlice(t term.Term, val reflect.Value) error {
+func (d *Decoder) pgSlice(t term.Term, val reflect.Value) ([]*Watcher, error) {
 	if !term.IsList(t) {
-		return fmt.Errorf("%v is not a slice", t)
+		return nil, fmt.Errorf("%v is not a slice", t)
 	}
 	len := d.listLen(t)
 	slice := reflect.MakeSlice(val.Type(), len, len)
+	var watchers []*Watcher
 	for i := 0; i < len; i++ {
 		c := t.(term.Callable)
 		e := c.Arguments()[0]
 		t = c.Arguments()[1]
-		if err := d.pgValue(e, slice.Index(i)); err != nil {
-			return err
+		ws, err := d.pgValue(e, slice.Index(i))
+		if err != nil {
+			return nil, err
 		}
+		watchers = append(watchers, ws...)
 	}
 	val.Set(slice)
-	return nil
+	return watchers, nil
 }
 
 func (d *Decoder) listLen(t term.Term) (len int) {
@@ -231,29 +281,30 @@ func (d *Decoder) pgString(t term.Term, val reflect.Value) error {
 	return nil
 }
 
-func (d *Decoder) pgStruct(t term.Term, val reflect.Value) error {
+func (d *Decoder) pgStruct(t term.Term, val reflect.Value) ([]*Watcher, error) {
 	names := map[string]term.Term{}
 	if !term.IsCallable(t) {
-		return fmt.Errorf("%s must be *term.Callable", t)
+		return nil, fmt.Errorf("%s must be *term.Callable", t)
 	}
 	c := t.(term.Callable)
 	if len(c.Arguments()) == 0 {
-		return nil
+		return nil, nil
 	}
 	if !term.IsList(c.Arguments()[0]) {
-		return fmt.Errorf("fields of %s must be inside a list", t)
+		return nil, fmt.Errorf("fields of %s must be inside a list", t)
 	}
 	for _, a := range term.ListToSlice(c.Arguments()[0]) {
 		if !term.IsCallable(a) {
-			return fmt.Errorf("%s must be *term.Callable", a)
+			return nil, fmt.Errorf("%s must be *term.Callable", a)
 		}
 		f := a.(term.Callable)
 		args := f.Arguments()
 		if len(args) != 1 {
-			return fmt.Errorf("invalid field specification: %s", f)
+			return nil, fmt.Errorf("invalid field specification: %s", f)
 		}
 		names[f.Name()] = args[0]
 	}
+	var watchers []*Watcher
 	for i := 0; i < val.NumField(); i++ {
 		tf := val.Type().Field(i)
 		if tf.PkgPath == "" {
@@ -264,11 +315,13 @@ func (d *Decoder) pgStruct(t term.Term, val reflect.Value) error {
 			f := val.Field(i)
 			fv := names[tag]
 			if fv != nil {
-				if err := d.pgValue(fv, f); err != nil {
-					return err
+				ws, err := d.pgValue(fv, f)
+				if err != nil {
+					return nil, err
 				}
+				watchers = append(watchers, ws...)
 			}
 		}
 	}
-	return nil
+	return watchers, nil
 }

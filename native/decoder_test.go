@@ -20,7 +20,7 @@ func (mi *MarshallerImpl) MarshalProlog(m golog.Machine, t term.Term) error {
 	*mi = MarshallerImpl{}
 	d := NewDecoder(m)
 	var val int
-	if err := d.Decode(t, &val); err != nil {
+	if err := d.DecodeGround(t, &val); err != nil {
 		return err
 	}
 	mi.Value = val
@@ -37,7 +37,7 @@ all_bools(
    third_fi31d(yes)]).
 `)
 	input := read.TermAll_(expected)[0]
-	if err := decoder.Decode(input, &ab); err != nil {
+	if err := decoder.DecodeGround(input, &ab); err != nil {
 		t.Fatalf("Decoding failed: %s", err)
 	}
 	if !ab.FirstField {
@@ -61,7 +61,7 @@ list(
         third_fi31d(no)])])]).
 `)
 	input := read.TermAll_(expected)[0]
-	if err := decoder.Decode(input, &ab); err != nil {
+	if err := decoder.DecodeGround(input, &ab); err != nil {
 		t.Fatalf("Decoding failed: %s", err)
 	}
 	if !ab.List[1].SECond_Field {
@@ -74,7 +74,7 @@ func TestDecodeMarshaller(t *testing.T) {
 	decoder := NewDecoder(golog.NewMachine())
 	expected := normalizeOutput(`wrap_marshaller([marshaller(42)]).`)
 	input := read.TermAll_(expected)[0]
-	if err := decoder.Decode(input, &ab); err != nil {
+	if err := decoder.DecodeGround(input, &ab); err != nil {
 		t.Fatalf("Decoding failed: %s", err)
 	}
 	if ab.Marshaller == nil {
